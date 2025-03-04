@@ -1,96 +1,122 @@
 version: '3.8'
+
 services:
-  n8n:
-    image: docker.n8n.io/n8nio/n8n
+  # Serviço principal do n8n (UI, agendador, orquestrador)
+  n8n-main:
+    image: n8nio/n8n:latest
+    container_name: n8n-main
+    restart: unless-stopped
+    ports:
+      - "5678:5678"  # expõe a UI do n8n na porta 5678
     environment:
-      - SERVICE_FQDN_N8N_5678
-      - 'N8N_EDITOR_BASE_URL=${SERVICE_FQDN_N8N}'
-      - 'WEBHOOK_URL=${SERVICE_FQDN_N8N}'
-      - 'N8N_HOST=${SERVICE_URL_N8N}'
-      - DB_POSTGRESDB_HOST=postgresql
+      - N8N_ENCRYPTION_KEY=SEU_SEGREDO_UNICO   # chave de criptografia (mesma em todos os containers n8n)
+      - EXECUTIONS_MODE=queue                 # habilita modo fila&#8203;:contentReference[oaicite:13]{index=13}
+      - N8N_DISABLE_PRODUCTION_MAIN_PROCESS=true  # não processa webhooks aqui&#8203;:contentReference[oaicite:14]{index=14}
+      - WEBHOOK_URL=https://n8n.seu-dominio.com/  # URL pública base dos webhooks&#8203;:contentReference[oaicite:15]{index=15}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
-      - 'DB_POSTGRESDB_DATABASE=${POSTGRES_DB}'
-      - 'DB_POSTGRESDB_USER=${POSTGRES_USER}'
-      - 'DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}'
-    volumes:
-      - 'n8n-data:/home/node/.n8n'
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=senha_postgres
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      # - QUEUE_BULL_REDIS_PASSWORD=senha_redis   # (descomente se Redis requer autenticação)
     depends_on:
-      postgresql:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - 'wget -qO- http://127.0.0.1:5678/'
-      interval: 10s
-      timeout: 30s
-      retries: 5
-  postgresql:
-    image: 'postgres:16-alpine'
-    volumes:
-      - 'postgres_storage:/var/lib/postgresql/data'
-    environment:
-      - 'POSTGRES_USER=${POSTGRES_USER}'
-      - 'POSTGRES_PASSWORD=${POSTGRES_PASSWORD}'
-      - 'POSTGRES_DB=${POSTGRES_DB}'      
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - 'test -S /var/run/postgresql/.s.PGSQL.5432'
-      interval: 10s
-      timeout: 30s
-      retries: 5
-    ports:
-      - "5432:5432"
-  redis:
-    image: 'redis:6-alpine'
-    container_name: redis
-    networks:
-      - demo
-    volumes:
-      - 'redis_storage:/data'
-    ports:
-      - '6379:6379'
-  qdrant:
-    image: qdrant/qdrant
-    container_name: qdrant
-    ports:
-      - '6333:6333'
-    volumes:
-      - 'qdrant_storage:/qdrant/storage'
-    networks:
-      - demo
-  ollama-cpu:
-    image: 'ollama/ollama:latest'
-    container_name: ollama-cpu
-    command: serve
-    ports:
-      - '11434:11434'
-    volumes:
-      - 'ollama_storage:/root/.ollama'
-    networks:
-      - demo
-    depends_on:
+      - postgres
       - redis
-  ollama-pull-llama-cpu:
-    image: 'ollama/ollama:latest'
-    container_name: ollama-pull-llama-cpu
-    entrypoint: /bin/sh
-    command:
-      - '-c'
-      - 'sleep 3; OLLAMA_HOST=ollama-cpu:11434 ollama pull llama3.2; OLLAMA_HOST=ollama-cpu:11434 ollama pull nomic-embed-text'
-    volumes:
-      - 'ollama_storage:/root/.ollama'
-    networks:
-      - demo
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+  # Serviço de workers do n8n (15 réplicas para execuções em paralelo)
+  n8n-worker:
+    image: n8nio/n8n:latest
+    container_name: n8n-worker
+    restart: unless-stopped
+    environment:
+      - N8N_ENCRYPTION_KEY=SEU_SEGREDO_UNICO   # mesma chave do n8n-main&#8203;:contentReference[oaicite:16]{index=16}
+      - EXECUTIONS_MODE=queue
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=senha_postgres
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      # - QUEUE_BULL_REDIS_PASSWORD=senha_redis
+    # Espera alguns segundos para garantir que postgres/redis já inicializaram, então inicia em modo worker&#8203;:contentReference[oaicite:17]{index=17}
+    command: /bin/sh -c "sleep 5; n8n worker"
     depends_on:
-      - ollama-cpu
+      - postgres
+      - redis
+    deploy:
+      replicas: 15
+      restart_policy:
+        condition: any
+
+  # Serviço de processadores de Webhook do n8n (opcional, para escalonar webhooks)
+  n8n-webhook:
+    image: n8nio/n8n:latest
+    container_name: n8n-webhook
+    restart: unless-stopped
+    environment:
+      - N8N_ENCRYPTION_KEY=SEU_SEGREDO_UNICO   # mesma chave de criptografia
+      - EXECUTIONS_MODE=queue
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=senha_postgres
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      # - QUEUE_BULL_REDIS_PASSWORD=senha_redis
+    command: /bin/sh -c "sleep 5; n8n webhook"  # inicia processo dedicado a webhooks&#8203;:contentReference[oaicite:18]{index=18}
+    depends_on:
+      - postgres
+      - redis
+    deploy:
+      replicas: 2   # pode ajustar o número de processadores de webhook conforme a carga
+      restart_policy:
+        condition: any
+
+  # Banco de dados PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: n8n-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=n8n
+      - POSTGRES_USER=n8n
+      - POSTGRES_PASSWORD=senha_postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      replicas: 1
+    networks:
+      - n8n-network
+
+  # Servidor Redis para a fila BullMQ
+  redis:
+    image: redis:6-alpine
+    container_name: n8n-redis
+    restart: unless-stopped
+    # Para habilitar senha no Redis, utilize REDIS_PASSWORD e configure requirepass, etc. em um arquivo de configuração do Redis
+    volumes:
+      - redis_data:/data
+    deploy:
+      replicas: 1
+    networks:
+      - n8n-network
+
 networks:
-  demo:
-    driver: bridge
+  n8n-network:
+    driver: overlay  # rede overlay (Swarm) compartilhada entre os serviços
+
 volumes:
-  postgres_storage: null
-  redis_storage: null
-  qdrant_storage: null
-  n8n_storage: null
-  ollama_storage: null
+  postgres_data:
+  redis_data:
 
